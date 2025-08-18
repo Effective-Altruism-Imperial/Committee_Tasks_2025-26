@@ -1,0 +1,114 @@
+name: assign-by-project-status
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # poll every 5 min
+  workflow_dispatch:        # manual run button
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  ORG: Effective-Altruism-Imperial
+  PROJECT_NUMBER: "2"
+  STATUS_FIELD: "Status"
+  MAP_JSON: '{"Ada":"Adellama75","Una":"Unading726","Ida":"IdaCy"}'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}   # if you hit 403/404 across repos, use a pat secret with org-wide repo access
+          script: |
+            const org = process.env.ORG;
+            const projectNumber = parseInt(process.env.PROJECT_NUMBER, 10);
+            const statusFieldName = process.env.STATUS_FIELD;
+            const map = JSON.parse(process.env.MAP_JSON);
+
+            const proj = await github.graphql(`
+              query($org:String!, $num:Int!) {
+                organization(login:$org){
+                  projectV2(number:$num){
+                    id
+                    fields(first:50){
+                      nodes{
+                        ... on ProjectV2SingleSelectField { id name options { id name } }
+                      }
+                    }
+                  }
+                }
+              }`, { org, num: projectNumber });
+
+            const project = proj.organization?.projectV2;
+            if (!project) { core.setFailed('project not found'); return; }
+
+            const statusField = project.fields.nodes.find(f => f && f.name === statusFieldName);
+            if (!statusField) { core.setFailed(`field '${statusFieldName}' not found`); return; }
+
+            let after = null;
+            const toAssign = [];
+
+            while (true) {
+              const page = await github.graphql(`
+                query($org:String!, $num:Int!, $after:String) {
+                  organization(login:$org){
+                    projectV2(number:$num){
+                      items(first:100, after:$after){
+                        pageInfo{ hasNextPage endCursor }
+                        nodes{
+                          content{
+                            __typename
+                            ... on Issue {
+                              id number
+                              repository { owner { login } name }
+                              assignees(first:10){ nodes{ login } }
+                            }
+                          }
+                          fieldValues(first:20){
+                            nodes{
+                              ... on ProjectV2ItemFieldSingleSelectValue {
+                                field{ ... on ProjectV2SingleSelectField { name } }
+                                name
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }`, { org, num: projectNumber, after });
+
+              const items = page.organization.projectV2.items;
+              for (const it of items.nodes) {
+                if (!it.content || it.content.__typename !== 'Issue') continue;
+
+                const fv = it.fieldValues.nodes.find(v => v?.field?.name === statusFieldName);
+                if (!fv?.name) continue;
+
+                const desiredUser = map[fv.name];
+                if (!desiredUser) continue;
+
+                const already = it.content.assignees.nodes.some(a => a.login.toLowerCase() === desiredUser.toLowerCase());
+                if (already) continue;
+
+                toAssign.push({
+                  owner: it.content.repository.owner.login,
+                  repo: it.content.repository.name,
+                  issue_number: it.content.number,
+                  assignee: desiredUser
+                });
+              }
+
+              if (!items.pageInfo.hasNextPage) break;
+              after = items.pageInfo.endCursor;
+            }
+
+            for (const x of toAssign) {
+              await github.rest.issues.addAssignees({
+                owner: x.owner, repo: x.repo, issue_number: x.issue_number, assignees: [x.assignee]
+              });
+              core.info(`assigned ${x.owner}/${x.repo}#${x.issue_number} -> ${x.assignee}`);
+            }
