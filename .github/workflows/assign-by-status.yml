@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}   # if you hit 403/404 across repos, use a pat secret with org-wide repo access
+          github-token: ${{ secrets.ASSIGN_BY_PROJECT_STATUS_PERSONAL_ACCESS_TOKEN }}   # PAT secret with specific repo access
           script: |
             const org = process.env.ORG;
             const projectNumber = parseInt(process.env.PROJECT_NUMBER, 10);
